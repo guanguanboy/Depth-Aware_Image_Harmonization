@@ -83,9 +83,9 @@ def train():
     display_id = 0
     update_html_freq = 1000
     save_epoch_freq = 5
-    save_iter_model = False
+    save_iter_model = True
     save_latest_freq = 5000
-    save_by_iter = False
+    save_by_iter = True
     lr_decay_iters = 50
     continue_train = False
 

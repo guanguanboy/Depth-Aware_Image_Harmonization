@@ -43,7 +43,10 @@ class retinexltifpmModel(nn.Module):
         self.lambda_R_gradient = 10.0
         self.metric = 0  
         self.optimizers = []
-
+        self.checkpoints_dir = './checkpoints'
+        self.name = 'retinexltifpm_allihd'
+        self.save_dir = os.path.join(self.checkpoints_dir, self.name)  # save all the checkpoints to save_dir
+        
         if self.ismaster:
             print(self.netG)  
         
@@ -112,8 +115,8 @@ class retinexltifpmModel(nn.Module):
             self.schedulers = [networks_init.get_scheduler(optimizer, lr_policy, epoch_count, niter, niter_decay, lr_decay_iters) for optimizer in self.optimizers]
         if not self.isTrain or continue_train:
             load_suffix = 'iter_%d' % load_iter if load_iter > 0 else epoch
-            #self.load_networks(load_suffix)
-        #self.print_networks(verbose)    
+            self.load_networks(load_suffix)
+        self.print_networks(verbose)    
 
     def update_learning_rate(self, lr_policy):
         """Update learning rates for all the networks; called at the end of every epoch"""
@@ -166,6 +169,80 @@ class retinexltifpmModel(nn.Module):
                 else:
                     torch.save(net.cpu().state_dict(), save_path)
 
+    def test(self):
+        """Forward function used in test time.
+
+        This function wraps <forward> function in no_grad() so we don't save intermediate steps for backprop
+        It also calls <compute_visuals> to produce additional visualization results
+        """
+        with torch.no_grad():
+            self.forward()
+
+    def get_image_paths(self):
+        """ Return image paths that are used to load current data"""
+        return self.image_paths
+
+    def __patch_instance_norm_state_dict(self, state_dict, module, keys, i=0):
+        """Fix InstanceNorm checkpoints incompatibility (prior to 0.4)"""
+        key = keys[i]
+        if i + 1 == len(keys):  # at the end, pointing to a parameter/buffer
+            if module.__class__.__name__.startswith('InstanceNorm') and \
+                    (key == 'running_mean' or key == 'running_var'):
+                if getattr(module, key) is None:
+                    state_dict.pop('.'.join(keys))
+            if module.__class__.__name__.startswith('InstanceNorm') and \
+               (key == 'num_batches_tracked'):
+                state_dict.pop('.'.join(keys))
+        else:
+            self.__patch_instance_norm_state_dict(state_dict, getattr(module, key), keys, i + 1)
+
+    def load_networks(self, epoch):
+        """Load all the networks from the disk.
+
+        Parameters:
+            epoch (int) -- current epoch; used in the file name '%s_net_%s.pth' % (epoch, name)
+        """
+        for name in self.model_names:
+            if isinstance(name, str):
+                if name == 'D':
+                    continue # TODO: Added by Matt
+                load_filename = '%s_net_%s.pth' % (epoch, name)
+                load_path = os.path.join(self.save_dir, load_filename)
+                print(load_path)
+                net = getattr(self, 'net' + name)
+                if isinstance(net, torch.nn.DataParallel) or isinstance(net, torch.nn.parallel.DistributedDataParallel):
+                    net = net.module
+                print('loading the model from %s' % load_path)
+                # if you are using PyTorch newer than 0.4 (e.g., built from
+                # GitHub source), you can remove str() on self.device
+                print(self.device)
+                state_dict = torch.load(load_path, map_location=self.device)
+                if hasattr(state_dict, '_metadata'):
+                    del state_dict._metadata
+
+                # patch InstanceNorm checkpoints prior to 0.4
+                for key in list(state_dict.keys()):  # need to copy keys here because we mutate in loop
+                    self.__patch_instance_norm_state_dict(state_dict, net, key.split('.'))
+                net.load_state_dict(state_dict, strict=False)
+
+    def print_networks(self, verbose):
+        """Print the total number of parameters in the network and (if verbose) network architecture
+
+        Parameters:
+            verbose (bool) -- if verbose: print the network architecture
+        """
+        print('---------- Networks initialized -------------')
+        for name in self.model_names:
+            if isinstance(name, str):
+                net = getattr(self, 'net' + name)
+                num_params = 0
+                for param in net.parameters():
+                    num_params += param.numel()
+                if verbose:
+                    print(net)
+                print('[Network %s] Total number of parameters : %.3f M' % (name, num_params / 1e6))
+        print('-----------------------------------------------')
+    
 
 def test_model():
     model = retinexltifpmModel("cuda:0", False)
